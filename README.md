@@ -563,9 +563,56 @@ Main reported scores will likely include:
 
 ## External Dependencies and Credit
 
+## External Toolboxes
+
+This repository does not directly include external third-party toolboxes.
+
+External toolboxes should be placed locally inside:
+
+```text
+external/
+```
+
+The `external/` folder is intentionally not tracked by Git and should be listed in `.gitignore`:
+
+```gitignore
+external/
+```
+
+This keeps the repository focused on our own code and avoids copying third-party toolbox code directly into the project.
+
+Recommended local folder structure:
+
+```text
+project_root/
+├── data/
+├── external/
+│   └── OASIS_matlab/
+├── results/
+├── scripts/
+├── src/
+└── README.md
+```
+
+External toolboxes are used as dependencies. They are not developed as part of this repository.
+
 ### OASIS
 
-This project currently uses the OASIS MATLAB toolbox for calcium deconvolution.
+This project uses the OASIS MATLAB toolbox for calcium deconvolution.
+
+OASIS is not included directly in this repository. To run OASIS-based scripts, download or clone OASIS locally into:
+
+```text
+external/OASIS_matlab/
+```
+
+The scripts add OASIS to the MATLAB path using:
+
+```matlab
+addpath(genpath(fullfile('..', 'external', 'OASIS_matlab')));
+```
+
+If the OASIS folder is missing, scripts that use `run_oasis_model()` will not run correctly.
 
 If this work is used in a publication, report, or formal presentation, OASIS should be credited and cited.
 
