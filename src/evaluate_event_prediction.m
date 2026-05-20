@@ -21,6 +21,16 @@ function metrics = evaluate_event_prediction(predicted_events, spikes, fps, tole
 %   Each predicted event can match at most one true event.
 %   Each true event can match at most one predicted event.
 %
+% Graded timing score:
+%   For each matched event, we assign a timing score:
+%
+%       score = max(0, 1 - abs(timing_error_sec) / tolerance_sec)
+%
+%   Interpretation:
+%       score = 1   -> perfect timing
+%       score = 0.5 -> halfway to the tolerance boundary
+%       score = 0   -> at the tolerance boundary
+%
 % Inputs:
 %   predicted_events - logical/numeric vector, 1 where model predicts event
 %   spikes           - binned spike train, same length as predicted_events
@@ -30,7 +40,7 @@ function metrics = evaluate_event_prediction(predicted_events, spikes, fps, tole
 %   burst_gap_sec    - max gap between spike bins to consider same burst
 %
 % Output:
-%   metrics - struct with detection and timing metrics
+%   metrics - struct with detection, timing, and graded timing-score metrics
 
     %% Basic input checks
 
@@ -243,6 +253,46 @@ function metrics = evaluate_event_prediction(predicted_events, spikes, fps, tole
         std_timing_error_sec = std(timing_errors_sec);
     end
 
+    %% Graded timing-score metrics
+
+    % The timing score gives partial credit based on how close a matched
+    % prediction is to the true event.
+    %
+    % score = 1 means exact timing.
+    % score = 0 means the prediction is at the tolerance boundary.
+    %
+    % This score is only calculated for matched events.
+    if isempty(timing_errors_sec)
+
+        timing_scores = [];
+        mean_timing_score = NaN;
+        total_timing_score = 0;
+        timing_weighted_recall = 0;
+
+    else
+
+        if tolerance_sec == 0
+            % If tolerance is zero, the only possible matched events are exact matches.
+            % Therefore all matched events receive full timing score.
+            timing_scores = ones(size(timing_errors_sec));
+        else
+            timing_scores = max(0, 1 - abs(timing_errors_sec) / tolerance_sec);
+        end
+
+        mean_timing_score = mean(timing_scores);
+        total_timing_score = sum(timing_scores);
+
+        % Timing-weighted recall:
+        %   total timing credit divided by the number of true events.
+        %
+        % This rewards models that detect many true events AND detect them close in time.
+        if n_true_events == 0
+            timing_weighted_recall = NaN;
+        else
+            timing_weighted_recall = total_timing_score / n_true_events;
+        end
+    end
+
     %% Package output
 
     metrics = struct();
@@ -273,6 +323,12 @@ function metrics = evaluate_event_prediction(predicted_events, spikes, fps, tole
     metrics.mean_abs_timing_error_sec = mean_abs_timing_error_sec;
     metrics.median_abs_timing_error_sec = median_abs_timing_error_sec;
     metrics.std_timing_error_sec = std_timing_error_sec;
+
+    % Graded timing-score metrics
+    metrics.timing_scores = timing_scores;
+    metrics.mean_timing_score = mean_timing_score;
+    metrics.total_timing_score = total_timing_score;
+    metrics.timing_weighted_recall = timing_weighted_recall;
 
     % Matching details
     metrics.matched_pred_idx = matched_pred_idx;

@@ -26,6 +26,8 @@ spike_times
 fps
 ```
 
+Some dataset files contain multiple recordings from the same biological cell. When available, the `cell_num` field is used to identify repeated segments from the same cell.
+
 ## Current Pipeline Scope
 
 Current input:
@@ -63,16 +65,18 @@ run spike/event inference model
 ↓
 evaluate predicted events
 ↓
-save comparison results to CSV
+save detailed and summary results to CSV
+↓
+visualize and diagnose model behavior
 ```
 
 ## Work Completed So Far
 
-### 1. Data inspection
+### 1. Data Inspection
 
-We wrote an inspection script to load the `.mat` file and check:
+We wrote an inspection script to load the `.mat` files and check:
 
-- Which variables exist in the file
+- Which variables exist in each file
 - How many recordings/neuron traces are included
 - What fields each recording contains
 - Trace length
@@ -81,19 +85,20 @@ We wrote an inspection script to load the `.mat` file and check:
 - Total spike count
 - Mean firing rate
 
-This confirmed that the calcium traces and spike trains are aligned and sampled at approximately 100 Hz.
+This confirmed that the calcium traces and spike trains are aligned and sampled at approximately 100 Hz before downsampling.
 
-### 2. Visualization of one neuron
+### 2. Visualization of One Neuron
 
-We plotted a calcium fluorescence trace together with ground-truth spike markers.
+We plotted calcium fluorescence traces together with ground-truth spike markers.
 
-This helped us verify visually that:
+This helped verify visually that:
 
-- The calcium signal looks reasonable
+- The calcium signal can be inspected before model development
 - Spike bins are present at expected times
-- The data can be inspected before building models
+- Some recordings are much noisier than others
+- Diagnostic visualization is important for understanding model behavior
 
-### 3. Downsampling logic
+### 3. Downsampling Logic
 
 Because the final lab data may have lower temporal resolution than the benchmark data, we tested downsampling from approximately 100 Hz to:
 
@@ -111,7 +116,7 @@ The downsampling logic is:
 
 This preserves total spike counts while reducing temporal resolution.
 
-### 4. Downsampling sanity checks
+### 4. Downsampling Sanity Checks
 
 We wrote a downsampling function with sanity checks for:
 
@@ -121,8 +126,10 @@ We wrote a downsampling function with sanity checks for:
 - Negative spike counts
 - Non-integer spike counts
 - Spike-count preservation after re-binning
+- Active spike-bin reduction after downsampling
+- Multi-spike bins created by temporal merging
 
-We also tested the function across all neurons in the current file and all target sampling rates.
+We also tested the function across all neurons in the current dataset files and all target sampling rates.
 
 ## Important Downsampling Observation
 
@@ -150,25 +157,15 @@ We implemented a simple rule-based calcium event detector.
 
 The model uses a combined evidence score based on:
 
-1. Positive calcium derivative  
+1. Positive calcium derivative
 2. Smoothed calcium amplitude
 
-The current score is:
+The score is:
 
 ```text
 event_score =
     derivative_weight * positive_derivative
   + amplitude_weight  * smoothed_calcium
-```
-
-Current baseline parameters used during development:
-
-```matlab
-smoothing_window_sec = 0.2;
-derivative_weight = 0.7;
-amplitude_weight = 0.3;
-event_score_threshold = 0.9;
-min_event_distance_sec = 0.10;
 ```
 
 The baseline logic was moved into a reusable function:
@@ -185,6 +182,18 @@ The function returns:
 - Smoothed calcium trace
 - Model parameters
 - Number of predicted events
+
+Development-stage parameters included:
+
+```matlab
+smoothing_window_sec = 0.2;
+derivative_weight = 0.7;
+amplitude_weight = 0.3;
+event_score_threshold = 0.9;
+min_event_distance_sec = 0.10;
+```
+
+These are not final. The parameters are later optimized on validation data.
 
 ### 2. OASIS Model
 
@@ -207,7 +216,7 @@ The function returns:
 - OASIS parameters
 - Number of predicted events
 
-Current OASIS parameters used during development:
+Development-stage OASIS parameters included:
 
 ```matlab
 ar_model = 'ar1';
@@ -218,7 +227,7 @@ oasis_threshold_z = 1.5;
 min_event_distance_sec = 0.10;
 ```
 
-These parameters are not final. They will be optimized later using validation data.
+These parameters are not final. Event-conversion parameters are optimized separately for each sampling rate.
 
 ## Evaluation Strategy
 
@@ -230,9 +239,9 @@ evaluate_event_prediction()
 
 This function compares predicted event times to the ground-truth binned spike train.
 
-The evaluation currently supports two modes:
+The evaluation currently supports two modes.
 
-### 1. Spike-bin evaluation
+### 1. Spike-bin Evaluation
 
 In this mode, every bin with at least one spike is treated as a true event.
 
@@ -248,17 +257,26 @@ It asks:
 Did the model detect spike-containing time bins?
 ```
 
-### 2. Burst-onset evaluation
+This mode is currently treated as the more relevant primary evaluation mode for spike inference over time.
+
+### 2. Burst-onset Evaluation
 
 In this mode, nearby spike bins are grouped into activity bursts, and only the first bin of each burst is treated as the true event.
 
-This is usually fairer for calcium-event detectors because one calcium transient can correspond to multiple spike-containing bins.
+Example:
 
-It asks:
+```text
+spike bins:    0 1 1 1 0 0 1 1 0
+burst onsets:  0 1 0 0 0 0 1 0 0
+```
+
+This mode asks:
 
 ```text
 Did the model detect the onset of an activity episode?
 ```
+
+This is useful as a secondary diagnostic mode because calcium transients can represent broader activity episodes rather than every individual spike-containing bin.
 
 ## Evaluation Metrics
 
@@ -275,6 +293,9 @@ For each model, sampling rate, and evaluation mode, we calculate:
 - Mean signed timing error
 - Median signed timing error
 - Standard deviation of timing error
+- Mean timing score
+- Total timing score
+- Timing-weighted recall
 
 Timing error is calculated for matched events:
 
@@ -289,15 +310,53 @@ positive timing error = prediction occurred after the true event
 negative timing error = prediction occurred before the true event
 ```
 
-## Model Comparison
+## Graded Timing Score
 
-We created a comparison script for:
+In addition to binary match/no-match evaluation, we added a graded timing score for matched events.
+
+For each matched event:
 
 ```text
-Simple Baseline vs OASIS
+timing_score = max(0, 1 - abs(timing_error_sec) / tolerance_sec)
 ```
 
-The script runs both models on one neuron across four sampling rates:
+Interpretation:
+
+```text
+score = 1   → exact timing
+score = 0.5 → halfway to the tolerance boundary
+score = 0   → at the tolerance boundary
+```
+
+This score gives partial credit for predictions that are close in time but not perfectly aligned.
+
+We also calculate:
+
+```text
+timing_weighted_recall = total_timing_score / number_of_true_events
+```
+
+This rewards models that both detect many true events and detect them close in time.
+
+## Model Comparison Across All Data
+
+We expanded the comparison workflow from one-neuron testing to all available mock dataset files.
+
+The scalable comparison script runs:
+
+```text
+all dataset files
+×
+all recordings
+×
+4 sampling rates
+×
+all implemented models
+×
+2 evaluation modes
+```
+
+Current sampling rates:
 
 ```text
 100 Hz
@@ -306,26 +365,132 @@ The script runs both models on one neuron across four sampling rates:
 10 Hz
 ```
 
-For each sampling rate, both models are evaluated using:
+Current models:
 
 ```text
-spike-bin mode
-burst-onset mode
+SimpleBaseline
+OASIS
 ```
 
-The script prints a compact comparison table and saves a detailed CSV file.
-
-Current output file:
+Current evaluation modes:
 
 ```text
-results/tables/baseline_vs_oasis_one_neuron_all_fps.csv
+spike_bins
+burst_onsets
 ```
 
-Each row in the CSV represents:
+The script saves a detailed result table and a summary table.
+
+Detailed output:
+
+```text
+results/tables/model_results_detailed.csv
+```
+
+Each row represents:
+
+```text
+dataset × recording × sampling rate × model × evaluation mode
+```
+
+Summary output:
+
+```text
+results/tables/model_results_summary.csv
+```
+
+Each row represents:
 
 ```text
 model × sampling rate × evaluation mode
 ```
+
+## Diagnostic Plots
+
+We added plotting utilities that read saved CSV results and generate diagnostic figures.
+
+Current plots include:
+
+- Mean F1 vs sampling rate
+- Timing-weighted recall vs sampling rate
+- Precision vs recall scatter plots
+- F1 distributions across recordings
+
+These plots are used for development and diagnostics, not final conclusions.
+
+## Train / Validation / Test Split
+
+We created a split table to support fair hyperparameter optimization and later final evaluation.
+
+Output file:
+
+```text
+results/tables/data_split.csv
+```
+
+The split is done by biological unit identity, not by result rows.
+
+If a recording has `cell_num`, the unit identity is based on:
+
+```text
+dataset_id + cell_num
+```
+
+If a recording does not have `cell_num`, the unit identity is based on:
+
+```text
+dataset_id + recording_idx
+```
+
+This prevents segments from the same biological cell from leaking across train, validation, and test splits.
+
+The split is performed within each dataset file to reduce the risk of one dataset being overrepresented in only one split.
+
+Current split structure:
+
+```text
+train
+validation
+test
+```
+
+## Hyperparameter Optimization
+
+We added validation-based hyperparameter optimization.
+
+Optimization is performed separately for each sampling rate:
+
+```text
+100 Hz
+50 Hz
+20 Hz
+10 Hz
+```
+
+This means each model can have a different best parameter set for each sampling rate.
+
+Current optimization output files:
+
+```text
+results/tables/hyperparameter_search_results_spike_bins.csv
+results/tables/best_model_params_by_fps_spike_bins.csv
+```
+
+The full search file contains one row per:
+
+```text
+model × sampling rate × parameter combination
+```
+
+The best-parameters file contains one row per:
+
+```text
+model × sampling rate
+```
+
+The current primary optimization objective is spike-bin F1 on the validation split.
+
+Timing-weighted recall and timing error are saved as secondary metrics.
 
 ## Current Development Strategy
 
@@ -338,38 +503,42 @@ visualize traces
 ↓
 downsample correctly
 ↓
-implement simple baseline
+implement reusable model functions
 ↓
 evaluate predictions
 ↓
-integrate OASIS
+compare models across all data
 ↓
-compare models
+split data by biological unit
 ↓
-scale to all neurons and sampling rates
+optimize hyperparameters on validation data
+↓
+diagnose model failure cases
+↓
+evaluate final performance on held-out test data
 ```
 
 This keeps the pipeline understandable, testable, and easy to debug.
 
 ## Planned Next Steps
 
-1. Run the current Simple Baseline vs OASIS comparison across all available neurons.
-2. Add train / validation / test splitting across neurons.
-3. Optimize model hyperparameters on validation neurons.
-4. Evaluate final model performance on held-out test neurons.
-5. Generate detailed and summary result tables:
-   - detailed table: one row per model × neuron × sampling rate × evaluation mode
-   - summary table: one row per model × sampling rate × evaluation mode
-6. Add additional models if feasible, such as:
-   - Suite2p deconvolution-related logic
-   - STM or another supervised/statistical model
+1. Use the optimized parameter table to run final evaluation on the held-out test split.
+2. Save final detailed and summary test-result tables.
+3. Continue using diagnostic plots to understand model failures.
+4. Add additional models if feasible.
+5. Compare models using:
+   - spike-bin F1
+   - burst-onset F1
+   - timing-weighted recall
+   - median absolute timing error
+   - mean signed timing bias
 
 ## Future Scaling Plan
 
 The final evaluation should compare models across:
 
 ```text
-~50 neurons
+~50 biological units
 ×
 4 sampling rates
 ×
@@ -381,15 +550,16 @@ multiple models
 The intended final result structure is:
 
 ```text
-one score per model per sampling rate
+one performance summary per model per sampling rate
 ```
 
-Main scores will likely include:
+Main reported scores will likely include:
 
-- Mean / median burst-onset F1 across neurons
-- Mean / median spike-bin F1 across neurons
-- Median absolute timing error across neurons
-- Mean signed timing bias across neurons
+- Mean / median spike-bin F1 across units
+- Mean / median burst-onset F1 across units
+- Mean / median timing-weighted recall
+- Median absolute timing error across units
+- Mean signed timing bias across units
 
 ## External Dependencies and Credit
 
@@ -414,4 +584,4 @@ OASIS is used here as an external deconvolution method. The current project wrap
 
 The current implementation is still under active development.
 
-Current results should be interpreted as development-stage outputs, not final model performance estimates. Reliable conclusions will require systematic testing across all neurons, sampling rates, and held-out evaluation data.
+Current results should be interpreted as development-stage outputs, not final model performance estimates. Reliable conclusions will require systematic testing across all neurons, sampling rates, optimized parameters, and held-out evaluation data.

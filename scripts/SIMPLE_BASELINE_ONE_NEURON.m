@@ -37,7 +37,7 @@ data = raw.data;
 %% Choose neuron and sampling rate
 
 neuron_idx = 1;
-target_fps = 20;
+target_fps = 100;
 
 rec = data{neuron_idx};
 
