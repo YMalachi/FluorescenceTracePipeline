@@ -5,6 +5,7 @@
 % Current models:
 %   1. SimpleBaseline
 %   2. OASIS
+%   3. MLspike
 %
 % Current sampling rates:
 %   100, 50, 20, 10 Hz
@@ -21,7 +22,7 @@
 %      one row per model x fps x evaluation mode
 %
 % Design note:
-%   This script is intentionally model-extensible.
+%   This script is model-extensible.
 %   To add a future model, add its name to model_names and add one case
 %   inside run_model_by_name() at the bottom of this file.
 
@@ -30,7 +31,12 @@ clear; clc; close all;
 %% Add project paths
 
 addpath(fullfile('..', 'src'));
-addpath(genpath(fullfile('..', 'external', 'OASIS_matlab')));
+
+% Add all external toolboxes:
+%   - OASIS_matlab
+%   - spikes / MLspike
+%   - brick dependency for MLspike
+addpath(genpath(fullfile('..', 'external')));
 
 %% Project folders
 
@@ -53,7 +59,7 @@ fprintf('Found %d dataset files.\n\n', length(dataset_files));
 
 %% Experiment settings
 
-target_fps_list = [100, 50, 20, 10];
+target_fps_list = [20, 10];
 
 evaluation_modes = {'spike_bins', 'burst_onsets'};
 
@@ -62,11 +68,7 @@ burst_gap_sec = 0.10;
 
 %% Model list
 
-% To add another model later:
-%   1. Add its name here.
-%   2. Add its parameters below.
-%   3. Add a case in run_model_by_name().
-model_names = {'SimpleBaseline', 'OASIS'};
+model_names = {'SimpleBaseline', 'OASIS', 'MLspike'};
 
 %% Simple baseline parameters
 
@@ -87,15 +89,38 @@ oasis_params.method = 'foopsi';
 oasis_params.optimize_b = true;
 oasis_params.optimize_pars = true;
 
-% Not final. These will later be optimized on validation data.
+% Not final. These can later be optimized on validation data.
 oasis_params.oasis_threshold_z = 1.5;
 oasis_params.min_event_distance_sec = 0.10;
+
+%% MLspike parameters
+
+mlspike_params = struct();
+
+% Start without autocalibration for the all-data run.
+% This is faster and more stable for first integration.
+mlspike_params.use_autocalibration = false;
+
+% Initial fixed parameters.
+% These are not final. We can optimize them later.
+mlspike_params.a = 0.07;
+mlspike_params.tau = 1.0;
+mlspike_params.sigma = 0.02;
+mlspike_params.saturation = 0.1;
+mlspike_params.drift_parameter = 0.01;
+
+% Bounds used only if use_autocalibration = true.
+mlspike_params.amin = 0.02;
+mlspike_params.amax = 0.20;
+mlspike_params.taumin = 0.20;
+mlspike_params.taumax = 2.00;
 
 %% Store all model parameters in one struct
 
 model_params = struct();
 model_params.SimpleBaseline = baseline_params;
 model_params.OASIS = oasis_params;
+model_params.MLspike = mlspike_params;
 
 %% Prepare detailed results table
 
@@ -310,14 +335,8 @@ function model_result = run_model_by_name(model_name, calcium, fps, model_params
 %
 % Runs one model using a shared interface.
 %
-% Input:
-%   model_name   - name of model to run
-%   calcium      - calcium trace
-%   fps          - sampling rate
-%   model_params - struct containing parameter structs for each model
-%
 % Output:
-%   model_result - struct that must contain:
+%   model_result must contain:
 %       predicted_events
 %       n_predicted_events
 
@@ -336,6 +355,13 @@ function model_result = run_model_by_name(model_name, calcium, fps, model_params
                 calcium, ...
                 fps, ...
                 model_params.OASIS);
+
+        case 'MLspike'
+
+            model_result = run_mlspike_model( ...
+                calcium, ...
+                fps, ...
+                model_params.MLspike);
 
         otherwise
 
@@ -521,8 +547,6 @@ function summary_table = summarize_results_table(detailed_results)
         summary_table = table();
         return;
     end
-
-    group_vars = {'model', 'target_fps', 'evaluation_mode'};
 
     [G, group_model, group_fps, group_mode] = findgroups( ...
         ok_rows.model, ...
